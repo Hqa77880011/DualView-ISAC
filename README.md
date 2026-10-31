@@ -85,8 +85,17 @@ Training writes `runs/train/model.pt`. Evaluation writes `metrics.json`, `predic
 
 With the default 2.56-second/16-token preprocessing, one token is 160 ms and `--offset 0.5` is 80 ms. Fractional shifts linearly interpolate tokens with zero fill at boundaries. This is a token-domain timing stress, not raw RF resampling. Training applies a uniformly sampled integer radar shift with `--time-jitter 1`; `--time-jitter 0` disables it. Alignment radius is measured in tokens. The implementation averages coordinatewise squared consistency errors. The paper does not provide complete optimizer/objective settings; AdamW, learning rate 1e-3, 50 epochs, batch 32, embedding 128 and the displayed loss weights are explicit runnable choices. This CNN/GRU has its measured parameter count; it does not claim the paper's reported 0.82M-parameter branch architecture.
 
-`--label-ratio 0` now retains no activity labels. For a positive ratio each represented training class retains at least one label. Groups must be partitioned before preparation. The supplied controls include CSI-only, radar-only and late fusion supervision; an early-fusion architecture is not implemented. The owned paired acquisition data and original baseline weights are not included, and no manuscript table was regenerated.
+`--label-ratio 0` now retains no activity labels. For a positive ratio each represented training class retains at least one label. Groups must be partitioned before preparation. The supplied controls include CSI-only, radar-only and late fusion supervision; the early-fusion baseline concatenates the 4 CSI and 2 radar channels before one CNN/GRU (`--architecture early`). The owned paired acquisition data and original baseline weights are not included, and no manuscript table was regenerated.
 
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+## Early-fusion baseline
+
+```bash
+dualview_isac train --data data/prepared --architecture early --dimension 128 --output runs/early --seed 42
+dualview_isac evaluate --data data/prepared --checkpoint runs/early/model.pt --missing-ratio 0.6 --offset 0.5 --output runs/early_eval
+```
+
+This is supervised early fusion at the common 32x32 feature-map grid, preceding CNN and recurrent encoding; late fusion keeps the two independent encoders. Missing normalized channels are zero-filled at inference. The early width is chosen to match the complete dual architecture's parameter budget; `--no-match-capacity` instead uses the exact supplied width. Saved checkpoints retain the architecture and actual width, and older dual checkpoints remain loadable. The reference-width-32 functional check selected early width 75: 59,851 versus 59,474 parameters (0.64% difference). Three tests now cover both architectures, gradients, updates, reload and metrics. Actual early CLI fitting and full/missing/CSI-only scoring passed using the previously prepared complex-signal fixture, one epoch, seed 42. Full data/label/transfer sweeps use the same preparation and evaluation interfaces as the dual method.

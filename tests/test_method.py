@@ -10,10 +10,38 @@ from sklearn.metrics import balanced_accuracy_score, f1_score
 from torch.nn import functional as F
 
 from dualview_isac.cli import shifted
-from dualview_isac.method import DualViewISAC, contrastive, temporal_contrastive
+from dualview_isac.method import (DualViewISAC, EarlyFusionISAC, contrastive,
+                                  matched_early_dimension, temporal_contrastive)
 
 
 class MethodTests(unittest.TestCase):
+    def test_early_fusion_is_learned_before_temporal_encoding(self):
+        torch.set_num_threads(1)
+        torch.manual_seed(42)
+        dimension = matched_early_dimension(32)
+        model = EarlyFusionISAC(dimension)
+        target = sum(p.numel() for p in DualViewISAC(32).parameters())
+        self.assertLess(abs(sum(p.numel() for p in model.parameters()) - target) / target, .02)
+        csi, radar = torch.randn(2, 4, 4, 16, 16), torch.randn(2, 4, 2, 16, 16)
+        before = model.encoder.front[0].weight.detach().clone()
+        loss = F.cross_entropy(model(csi, radar)["full"], torch.tensor([0, 1]))
+        self.assertTrue(torch.isfinite(loss))
+        loss.backward()
+        for prefix in ["encoder.front", "encoder.temporal", "head"]:
+            self.assertTrue(any(p.grad is not None and torch.isfinite(p.grad).all() and p.grad.abs().sum() > 0
+                                for name, p in model.named_parameters() if name.startswith(prefix)))
+        torch.optim.Adam(model.parameters(), lr=.01).step()
+        self.assertFalse(torch.equal(before, model.encoder.front[0].weight))
+        model.eval()
+        buffer = io.BytesIO()
+        torch.save(model.state_dict(), buffer)
+        buffer.seek(0)
+        restored = EarlyFusionISAC(dimension).eval()
+        restored.load_state_dict(torch.load(buffer, weights_only=True))
+        torch.testing.assert_close(model(csi, radar)["full"], restored(csi, radar)["full"])
+        self.assertEqual(model.predict(csi=csi).shape, (2, 6))
+        self.assertEqual(model.predict(radar=radar).shape, (2, 6))
+
     def test_learning_and_checkpoint(self):
         torch.set_num_threads(1)
         torch.manual_seed(42)

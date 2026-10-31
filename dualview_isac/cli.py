@@ -11,7 +11,7 @@ import torch
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix, f1_score
 from torch.nn import functional as F
 
-from .method import DualViewISAC, contrastive, temporal_contrastive
+from .method import DualViewISAC, EarlyFusionISAC, contrastive, temporal_contrastive, matched_early_dimension
 
 
 def resize_map(values):
@@ -92,7 +92,8 @@ def train(args):
         index = rng.permutation(np.flatnonzero(labels == c))
         retained = 0 if args.label_ratio == 0 else max(1, round(len(index) * args.label_ratio))
         labels[index[retained:]] = -1
-    net = DualViewISAC(args.dimension).to(args.device)
+    dimension = matched_early_dimension(args.dimension) if args.architecture == "early" and args.match_capacity else args.dimension
+    net = (EarlyFusionISAC(dimension) if args.architecture == "early" else DualViewISAC(dimension)).to(args.device)
     optimizer = torch.optim.AdamW(net.parameters(), lr=args.lr)
     for _ in range(args.epochs):
         net.train()
@@ -126,7 +127,8 @@ def train(args):
             optimizer.step()
     outpath = Path(args.output)
     outpath.mkdir(parents=True, exist_ok=True)
-    torch.save({"model": net.state_dict(), "dimension": args.dimension}, outpath / "model.pt")
+    torch.save({"model": net.state_dict(), "dimension": dimension, "architecture": args.architecture,
+                "reference_dimension": args.dimension}, outpath / "model.pt")
 
 
 def shifted(x, offset):
@@ -145,7 +147,8 @@ def shifted(x, offset):
 
 def evaluate(args):
     saved = torch.load(args.checkpoint, map_location=args.device, weights_only=True)
-    net = DualViewISAC(saved["dimension"]).to(args.device)
+    architecture = saved.get("architecture", "dual")
+    net = (EarlyFusionISAC(saved["dimension"]) if architecture == "early" else DualViewISAC(saved["dimension"])).to(args.device)
     net.load_state_dict(saved["model"])
     net.eval()
     data = np.load(Path(args.data) / f"{args.split}.npz", allow_pickle=False)
@@ -166,7 +169,11 @@ def evaluate(args):
                 choose_csi = rng.random(len(index)) < 0.5
                 for i in range(len(index)):
                     if missing[i]:
-                        p[i] = output["csi" if choose_csi[i] else "radar"][i].softmax(-1)
+                        if architecture == "early":
+                            p[i] = net.predict(csi=c[i:i+1] if choose_csi[i] else None,
+                                               radar=r[i:i+1] if not choose_csi[i] else None)[0].softmax(-1)
+                        else:
+                            p[i] = output["csi" if choose_csi[i] else "radar"][i].softmax(-1)
             else:
                 p = net.predict(csi=c if args.view == "csi" else None, radar=r if args.view == "radar" else None).softmax(-1)
             if args.device.startswith("cuda"):
@@ -214,6 +221,8 @@ def main():
         p.add_argument("--seed", type=int, default=42)
         p.add_argument("--view", choices=["full", "csi", "radar"], default="full")
         if command == "train":
+            p.add_argument("--architecture", choices=["dual", "early"], default="dual")
+            p.add_argument("--match-capacity", action=argparse.BooleanOptionalAction, default=True)
             p.add_argument("--epochs", type=int, default=50)
             p.add_argument("--dimension", type=int, default=128)
             p.add_argument("--radius", type=int, default=2)
@@ -232,6 +241,8 @@ def main():
             p.add_argument("--missing-ratio", type=float, default=0)
             p.set_defaults(function=evaluate)
     args = parser.parse_args()
+    if args.command == "train" and args.architecture == "early":
+        args.supervised_only, args.view = True, "full"
     if args.command == "train" and (not 0 <= args.label_ratio <= 1 or args.temperature <= 0
                                     or args.radius < 0 or args.time_jitter < 0):
         parser.error("Require label ratio in [0,1], positive temperature and nonnegative radius/jitter")

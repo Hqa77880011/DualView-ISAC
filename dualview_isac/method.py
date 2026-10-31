@@ -42,6 +42,36 @@ class DualViewISAC(nn.Module):
         return self(csi, radar)["full"]
 
 
+class EarlyFusionISAC(nn.Module):
+    """Supervised early fusion of aligned CSI/radar feature maps before one CNN/GRU."""
+    def __init__(self, dimension=128, classes=6):
+        super().__init__()
+        self.encoder = ViewEncoder(6, dimension)
+        self.head = nn.Linear(dimension, classes)
+
+    def forward(self, csi, radar):
+        return {"full": self.head(self.encoder(torch.cat([csi, radar], dim=2))[1])}
+
+    def predict(self, csi=None, radar=None):
+        if csi is None and radar is None:
+            raise ValueError("At least one RF view is required")
+        if csi is None:
+            csi = radar.new_zeros((*radar.shape[:2], 4, *radar.shape[3:]))
+        if radar is None:
+            radar = csi.new_zeros((*csi.shape[:2], 2, *csi.shape[3:]))
+        return self(csi, radar)["full"]
+
+
+def matched_early_dimension(reference_dimension, classes=6):
+    """Choose the nearest early-fusion width to the complete DualView parameter budget."""
+    target = sum(p.numel() for p in DualViewISAC(reference_dimension, classes).parameters())
+    # ViewEncoder(6,d) + classifier: 6*d**2 + (71+classes)*d + 20320+classes.
+    linear, constant = 71 + classes, 20320 + classes
+    root = (-linear + (linear**2 + 24 * (target - constant))**0.5) / 12
+    choices = [max(1, int(root)), max(1, int(root) + 1)]
+    return min(choices, key=lambda d: abs(6*d*d + linear*d + constant - target))
+
+
 def contrastive(zc, zr, temperature):
     similarity = F.normalize(zc, dim=-1) @ F.normalize(zr, dim=-1).T / temperature
     labels = torch.arange(len(zc), device=zc.device)
