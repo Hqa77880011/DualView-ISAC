@@ -90,7 +90,8 @@ def train(args):
     labels = data["y"].copy()
     for c in np.unique(labels[labels >= 0]):
         index = rng.permutation(np.flatnonzero(labels == c))
-        labels[index[max(1, round(len(index) * args.label_ratio)):]] = -1
+        retained = 0 if args.label_ratio == 0 else max(1, round(len(index) * args.label_ratio))
+        labels[index[retained:]] = -1
     net = DualViewISAC(args.dimension).to(args.device)
     optimizer = torch.optim.AdamW(net.parameters(), lr=args.lr)
     for _ in range(args.epochs):
@@ -101,6 +102,8 @@ def train(args):
             if len(index) < 2 and not args.supervised_only:
                 continue
             c, r = [torch.as_tensor(data[k][index], device=args.device) for k in ["csi", "radar"]]
+            if args.time_jitter:
+                r = shifted(r, int(rng.integers(-args.time_jitter, args.time_jitter + 1)))
             out = net(c, r)
             loss = out["full"].sum() * 0
             if not args.supervised_only:
@@ -127,14 +130,17 @@ def train(args):
 
 
 def shifted(x, offset):
+    """Shift temporal tokens with zero fill; fractional offsets interpolate tokens."""
     if offset == 0:
         return x
-    out = torch.zeros_like(x)
-    if offset > 0:
-        out[:, offset:] = x[:, :-offset]
-    else:
-        out[:, :offset] = x[:, -offset:]
-    return out
+    positions = torch.arange(x.shape[1], device=x.device, dtype=x.dtype) - offset
+    lower = positions.floor().long()
+    upper = lower + 1
+    fraction = (positions - lower).view(1, -1, 1, 1, 1)
+    valid_lower = ((lower >= 0) & (lower < x.shape[1])).view(1, -1, 1, 1, 1)
+    valid_upper = ((upper >= 0) & (upper < x.shape[1])).view(1, -1, 1, 1, 1)
+    return (x[:, lower.clamp(0, x.shape[1] - 1)] * (1 - fraction) * valid_lower
+            + x[:, upper.clamp(0, x.shape[1] - 1)] * fraction * valid_upper)
 
 
 def evaluate(args):
@@ -211,6 +217,8 @@ def main():
             p.add_argument("--epochs", type=int, default=50)
             p.add_argument("--dimension", type=int, default=128)
             p.add_argument("--radius", type=int, default=2)
+            p.add_argument("--time-jitter", type=int, default=1,
+                           help="Uniform training offset in +/- temporal tokens (default token is 160 ms)")
             for key, value in [("lr", 1e-3), ("label-ratio", 1), ("temperature", 0.1), ("temporal-weight", 0.5), ("view-weight", 1)]:
                 p.add_argument("--" + key, type=float, default=value)
             for flag in ["no-alignment", "no-viewdrop", "supervised-only"]:
@@ -219,8 +227,14 @@ def main():
         else:
             p.add_argument("--checkpoint", default="runs/train/model.pt")
             p.add_argument("--split", default="test")
-            p.add_argument("--offset", type=int, default=0)
+            p.add_argument("--offset", type=float, default=0,
+                           help="Radar token offset; 0.5/1 are 80/160 ms with default preprocessing")
             p.add_argument("--missing-ratio", type=float, default=0)
             p.set_defaults(function=evaluate)
     args = parser.parse_args()
+    if args.command == "train" and (not 0 <= args.label_ratio <= 1 or args.temperature <= 0
+                                    or args.radius < 0 or args.time_jitter < 0):
+        parser.error("Require label ratio in [0,1], positive temperature and nonnegative radius/jitter")
+    if args.command == "evaluate" and not 0 <= args.missing_ratio <= 1:
+        parser.error("Missing-view ratio must be in [0,1]")
     args.function(args)

@@ -10,7 +10,7 @@ Requires Python `>=3.10`. Run from the repository root in an activated environme
 python -m pip install -e .
 ```
 
-Inspection environment: Python 3.13.5; numpy 2.1.3, scipy 1.15.3, torch 2.7.1+cu118, scikit-learn 1.6.1, matplotlib 3.10.0. Checks: Python syntax, configuration parsing and CLI/source argument matching. Training and full evaluation were not run.
+Validation (2026-11-01): Python 3.13.5, NumPy 2.1.3, SciPy 1.15.3, PyTorch 2.7.1+cu118, scikit-learn 1.6.1; CPU, one PyTorch thread, seed 42. Actual paired complex CSI/radar NPZ records passed manifest loading, train-only normalization, token preprocessing, one epoch (dimension 8, batch 2), checkpoint loading and evaluation with a half-token timing offset and 50% missing views. Two tests passed: finite joint loss, nonzero gradients in both encoders/GRUs/fusion/heads, parameter update, reload agreement (rtol 1e-6, atol 1e-7), fractional shifts and hand-computed contrastive/F1/balanced-accuracy values. The four generated records check functionality and do not establish paper recognition performance.
 
 ## Data and preprocessing
 
@@ -71,3 +71,22 @@ Evaluate each fitted control with its own checkpoint; scoring/stress controls ab
 ## Outputs
 
 Training writes `runs/train/model.pt`. Evaluation writes `metrics.json`, `predictions.npz`, `confusion.csv` and `confusion.png`. Prepared normalization is stored in `data/prepared/normalization.npz`.
+
+## Method mapping and explicit settings
+
+| Paper component | Code | Command |
+| --- | --- | --- |
+| CSI/radar preprocessing and train-only statistics | `dualview_isac/cli.py:prepare` | `dualview_isac prepare` |
+| Independent CNN/GRU encoders and view heads | `dualview_isac/method.py` | `dualview_isac train` |
+| Symmetric cross-view and bounded temporal contrast | `contrastive`, `temporal_contrastive` | `dualview_isac train --radius 2 --temperature 0.1 --temporal-weight 0.5` |
+| Stop-gradient full-to-single view consistency | `dualview_isac/cli.py:train` | `dualview_isac train --view-weight 1` |
+| Macro-F1, balanced accuracy, group scores, parameters, latency | `dualview_isac/cli.py:evaluate` | `dualview_isac evaluate` |
+| Missing-view and offset controls | `shifted`, `evaluate` | `dualview_isac evaluate --missing-ratio 0.6 --offset 0.5` |
+
+With the default 2.56-second/16-token preprocessing, one token is 160 ms and `--offset 0.5` is 80 ms. Fractional shifts linearly interpolate tokens with zero fill at boundaries. This is a token-domain timing stress, not raw RF resampling. Training applies a uniformly sampled integer radar shift with `--time-jitter 1`; `--time-jitter 0` disables it. Alignment radius is measured in tokens. The implementation averages coordinatewise squared consistency errors. The paper does not provide complete optimizer/objective settings; AdamW, learning rate 1e-3, 50 epochs, batch 32, embedding 128 and the displayed loss weights are explicit runnable choices. This CNN/GRU has its measured parameter count; it does not claim the paper's reported 0.82M-parameter branch architecture.
+
+`--label-ratio 0` now retains no activity labels. For a positive ratio each represented training class retains at least one label. Groups must be partitioned before preparation. The supplied controls include CSI-only, radar-only and late fusion supervision; an early-fusion architecture is not implemented. The owned paired acquisition data and original baseline weights are not included, and no manuscript table was regenerated.
+
+```bash
+python -m unittest discover -s tests -v
+```
