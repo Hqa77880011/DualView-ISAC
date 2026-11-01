@@ -10,11 +10,9 @@ Requires Python `>=3.10`. Run from the repository root in an activated environme
 python -m pip install -e .
 ```
 
-Validation (2026-11-01): Python 3.13.5, NumPy 2.1.3, SciPy 1.15.3, PyTorch 2.7.1+cu118, scikit-learn 1.6.1; CPU, one PyTorch thread, seed 42. Actual paired complex CSI/radar NPZ records passed manifest loading, train-only normalization, token preprocessing, one epoch (dimension 8, batch 2), checkpoint loading and evaluation with a half-token timing offset and 50% missing views. Two tests passed: finite joint loss, nonzero gradients in both encoders/GRUs/fusion/heads, parameter update, reload agreement (rtol 1e-6, atol 1e-7), fractional shifts and hand-computed contrastive/F1/balanced-accuracy values. The four generated records check functionality and do not establish paper recognition performance.
-
 ## Data and preprocessing
 
-Export synchronized recording intervals to NumPy archives with complex `csi[T,antenna,subcarrier]`, complex `radar[frame,chirp,fast_sample]`, and scalar `csi_fs`/`radar_fs` in samples or frames per second. Both arrays must refer to the same recording origin. The paired collection described by the manuscript is provided by its data owner; this interface also accepts paired measurements from your own acquisition system.
+Export synchronized recording intervals to NumPy archives with complex `csi[T,antenna,subcarrier]`, complex `radar[frame,chirp,fast_sample]`, and scalar `csi_fs`/`radar_fs` in samples or frames per second. Both arrays must refer to the same recording origin. Supply paired measurements from the acquisition owner or your own sensors.
 
 Create a manifest with paths relative to its location:
 
@@ -28,8 +26,6 @@ Create a manifest with paths relative to its location:
 ```
 
 Label sit, stand, walk, lie down, pick up and wave as `0..5`; use `-1` for unlabeled training recordings. Each row describes one constant-activity interval. Group by the held-out subject, session or device identity appropriate to the experiment. Related recordings must remain in one partition; assign the held-out room to `transfer` before preparation.
-
-
 
 Preparation creates 2.56-second windows with 50% overlap only in training and no overlap in later partitions. Each window becomes 16 temporal tokens. CSI channels contain mean amplitude, detrended adjacent-antenna phase difference, antenna correlation and local Doppler FFT magnitude. Radar channels contain mean range–Doppler magnitude and a range-summed micro-Doppler map. Maps are resized to 32×32. Channel normalization uses only training-window statistics, saved in `normalization.npz`.
 
@@ -72,9 +68,9 @@ Evaluate each fitted control with its own checkpoint; scoring/stress controls ab
 
 Training writes `runs/train/model.pt`. Evaluation writes `metrics.json`, `predictions.npz`, `confusion.csv` and `confusion.png`. Prepared normalization is stored in `data/prepared/normalization.npz`.
 
-## Method mapping and explicit settings
+## Method and metrics
 
-| Paper component | Code | Command |
+| Component | Code | Command |
 | --- | --- | --- |
 | CSI/radar preprocessing and train-only statistics | `dualview_isac/cli.py:prepare` | `dualview_isac prepare` |
 | Independent CNN/GRU encoders and view heads | `dualview_isac/method.py` | `dualview_isac train` |
@@ -83,9 +79,9 @@ Training writes `runs/train/model.pt`. Evaluation writes `metrics.json`, `predic
 | Macro-F1, balanced accuracy, group scores, parameters, latency | `dualview_isac/cli.py:evaluate` | `dualview_isac evaluate` |
 | Missing-view and offset controls | `shifted`, `evaluate` | `dualview_isac evaluate --missing-ratio 0.6 --offset 0.5` |
 
-With the default 2.56-second/16-token preprocessing, one token is 160 ms and `--offset 0.5` is 80 ms. Fractional shifts linearly interpolate tokens with zero fill at boundaries. This is a token-domain timing stress, not raw RF resampling. Training applies a uniformly sampled integer radar shift with `--time-jitter 1`; `--time-jitter 0` disables it. Alignment radius is measured in tokens. The implementation averages coordinatewise squared consistency errors. The paper does not provide complete optimizer/objective settings; AdamW, learning rate 1e-3, 50 epochs, batch 32, embedding 128 and the displayed loss weights are explicit runnable choices. This CNN/GRU has its measured parameter count; it does not claim the paper's reported 0.82M-parameter branch architecture.
+At 2.56 seconds and 16 tokens, one token is 160 ms; `--offset 0.5` shifts 80 ms in token space by linear interpolation and zero fill. Training samples radar shifts with `--time-jitter 1`; use 0 to disable jitter. Radius is measured in tokens. Consistency loss averages coordinatewise squared errors. Defaults are AdamW, learning rate 1e-3, 50 epochs, batch 32 and embedding 128.
 
-`--label-ratio 0` now retains no activity labels. For a positive ratio each represented training class retains at least one label. Groups must be partitioned before preparation. The supplied controls include CSI-only, radar-only and late fusion supervision; the early-fusion baseline concatenates the 4 CSI and 2 radar channels before one CNN/GRU (`--architecture early`). The owned paired acquisition data and original baseline weights are not included, and no manuscript table was regenerated.
+`--label-ratio 0` retains no activity labels; positive ratios retain at least one example per represented class. CSI-only, radar-only and late-fusion controls use the paired preparation. Early fusion concatenates four CSI and two radar channels before one CNN/GRU.
 
 ```bash
 python -m unittest discover -s tests -v
@@ -98,18 +94,10 @@ dualview_isac train --data data/prepared --architecture early --dimension 128 --
 dualview_isac evaluate --data data/prepared --checkpoint runs/early/model.pt --missing-ratio 0.6 --offset 0.5 --output runs/early_eval
 ```
 
-This is supervised early fusion at the common 32x32 feature-map grid, preceding CNN and recurrent encoding; late fusion keeps the two independent encoders. Missing normalized channels are zero-filled at inference. The early width is chosen to match the complete dual architecture's parameter budget; `--no-match-capacity` instead uses the exact supplied width. Saved checkpoints retain the architecture and actual width, and older dual checkpoints remain loadable. The reference-width-32 functional check selected early width 75: 59,851 versus 59,474 parameters (0.64% difference). Three tests now cover both architectures, gradients, updates, reload and metrics. Actual early CLI fitting and full/missing/CSI-only scoring passed using the previously prepared complex-signal fixture, one epoch, seed 42. Full data/label/transfer sweeps use the same preparation and evaluation interfaces as the dual method.
+Early fusion operates on the common 32×32 feature grid; late fusion retains two encoders. Missing normalized channels are zero-filled. Early width is selected by parameter count; `--no-match-capacity` uses the requested width. Checkpoints store architecture and fitted width.
 
+## Acquisition data and related sources
 
-## Acquisition data and checked public alternatives
+Supply paired complex CSI and FMCW echo arrays from the acquisition owner or your own sensors using the manifest above. Preserve actual pair IDs, sampling rates, common time origins and subject/session/room/device groups.
 
-The local manuscript (`main.tex`, Dataset and grouped split) specifies **12 subjects, four rooms, two CSI links, one FMCW receiver, six activities (sit/stand/walk/lie/pick-up/wave), 48,000 unlabeled and 7,200 labeled 2.56-second paired windows**. Neither that source directory nor this repository contains the original acquisition files, timestamps, grouped split manifest, exact 0.82M branch definition or trained weights. The paper does not identify a public release for this acquisition. This is an unavailable author artifact, rather than a failure to locate Wi-Fi or radar data in general.
-
-Two real public multimodal releases were checked instead of claiming that no paired RF dataset exists:
-
-* [MM-Fi official toolbox/release](https://github.com/ybhbingo/MMFI_Dataset): genuinely synchronized Wi-Fi/mmWave data are public. Its [original loader](https://github.com/ybhbingo/MMFI_Dataset/blob/main/mmfi_lib/mmfi.py) reads `wifi-csi` as `CSIamp` from MAT and mmWave as `float64` point clouds reshaped to `(-1,5)`. These exports do not supply complex CSI phase or FMCW chirp/fast-time echoes. The paper's calibrated phase features and range-Doppler FFT cannot be reconstructed from amplitude-only tensors and detected points. No fake complex phase, raw ADC samples or paper-specific six-class labels were created from them.
-* [OPERAnet original data descriptor](https://doi.org/10.1038/s41597-022-01573-2): provides synchronized Wi-Fi CSI and **passive Wi-Fi radar**, plus other sensors, with a different two-room/six-participant activity protocol. Passive radar Doppler measurements are not the manuscript's FMCW echo capture and are not renamed as its acquisition or used to regenerate its tables. A separate sensor/frontend study would need its own declared protocol.
-
-To run this paper's original real-data path, the exact missing input is a manifest pointing to paired acquisition NPZ files with `csi` = complex `[sample,antenna,subcarrier]`, `radar` = complex `[frame,chirp,fast_sample]`, positive actual `csi_fs,radar_fs`; each manifest row needs the six-class label (or -1 for unlabeled), subject/session `group`, room/device and train/test/transfer split. Pair identity and common time origin/recorded offsets must come from the acquisition. Groups must be fixed before overlapping training windows are created. These raw arrays or an original feature archive with its exact feature definitions are needed; point clouds, unrelated CSI/radar recordings and a synthetic manifest cannot fill this gap. The current raw-data reader already validates complex shape and grouped split separation.
-
-This source check changes no performance result and adds no synthetic validation. Existing model/baseline/metric functionality remains as previously tested; resolving the original-data comparison requires the acquisition artifact above.
+[MM-Fi](https://github.com/ybhbingo/MMFI_Dataset) provides CSI amplitudes and mmWave point clouds. [OPERAnet](https://doi.org/10.1038/s41597-022-01573-2) provides Wi-Fi CSI and passive Wi-Fi radar. Their exported modalities require their own feature preparation; this reader expects complex CSI phase and FMCW chirp/fast-time samples.
